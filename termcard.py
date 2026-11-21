@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import os
 import re
+import urllib.error
 import urllib.request
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -76,6 +78,7 @@ THEMES = {
 }
 
 DEFAULT_FONT = "JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+MANIFEST_NAME = ".termcard-manifest.json"
 
 
 def esc(value: object) -> str:
@@ -89,9 +92,37 @@ def clamp_int(val: object, lo: int, hi: int, fallback: int) -> int:
         return fallback
 
 
-def resolve_theme(config: dict) -> dict:
-    name = config.get("theme", "dashed-dark")
-    base = dict(THEMES.get(name, THEMES["dashed-dark"]))
+def truncate_text(text: str, max_len: int) -> str:
+    if max_len <= 0:
+        return ""
+    if len(text) <= max_len:
+        return text
+    if max_len <= 3:
+        return text[:max_len]
+    return text[: max_len - 3].rstrip() + "..."
+
+
+def fit_pair(label: str, value: str, width: int) -> tuple[str, str]:
+    max_total = max(6, ((width - 48) * 10) // 84 - 2)
+    l_len = len(label)
+    v_len = len(value)
+    if l_len + v_len <= max_total:
+        return label, value
+    if v_len == 0:
+        return truncate_text(label, max_total), ""
+    if l_len == 0:
+        return "", truncate_text(value, max_total)
+    half_label = max(4, (max_total * 4) // 10)
+    half_value = max_total - half_label
+    if l_len <= half_label:
+        return label, truncate_text(value, max_total - l_len)
+    if v_len <= half_value:
+        return truncate_text(label, max_total - v_len), value
+    return truncate_text(label, half_label), truncate_text(value, half_value)
+
+
+def resolve_theme_variant(config: dict, theme_name: str, mode: str | None = None) -> dict:
+    base = dict(THEMES.get(theme_name, THEMES["dashed-dark"]))
     base.update(
         {
             "width": clamp_int(config.get("width", 560), 360, 680, 560),
@@ -99,10 +130,44 @@ def resolve_theme(config: dict) -> dict:
             "font": config.get("font") or DEFAULT_FONT,
         }
     )
-    for key, val in (config.get("style") or {}).items():
-        if val is not None and str(val) != "":
-            base[key] = val
+    style = config.get("style") or {}
+    if isinstance(style, dict):
+        if mode in ("dark", "light") and isinstance(style.get(mode), dict):
+            override = style[mode]
+        elif mode == "light":
+            # Flat style overrides target the primary/dark preset so light mode keeps readable contrast.
+            override = {}
+        else:
+            override = {k: v for k, v in style.items() if not isinstance(v, dict)}
+        for key, val in override.items():
+            if val is not None and str(val) != "":
+                base[key] = val
     return base
+
+
+def resolve_themes(config: dict) -> list[tuple[str | None, dict]]:
+    raw_theme = config.get("theme", "dashed-dark")
+    if isinstance(raw_theme, dict):
+        dark_name = str(raw_theme.get("dark") or "dashed-dark")
+        light_name = str(raw_theme.get("light") or "dashed-light")
+        return [
+            ("dark", resolve_theme_variant(config, dark_name, mode="dark")),
+            ("light", resolve_theme_variant(config, light_name, mode="light")),
+        ]
+    name = str(raw_theme or "dashed-dark")
+    return [(None, resolve_theme_variant(config, name, mode=None))]
+
+
+def resolve_theme(config: dict) -> dict:
+    return resolve_themes(config)[0][1]
+
+
+def variant_filename(filename: str, variant: str | None) -> str:
+    if not variant:
+        return filename
+    if filename.lower().endswith(".svg"):
+        return f"{filename[:-4]}-{variant}.svg"
+    return f"{filename}-{variant}"
 
 
 def dash_attr(val: str) -> str:
@@ -243,13 +308,20 @@ def render_typing(card: dict, t: dict) -> str:
         )
 
     reduced_motion_rule = "@media (prefers-reduced-motion: reduce){text,rect{animation:none !important}.r{opacity:1 !important}}"
-    body = (
-        render_box(w, h, t)
-        + f'<text x="24" y="30">{esc(prompt_top)}</text>'
+    clip_id = f"tc-clip-{w}-{t['radius']}"
+    clip_rx = max(0, int(t["radius"]) - 1)
+    defs = (
+        f'<defs><clipPath id="{clip_id}">'
+        f'<rect x="12" y="4" width="{w - 24}" height="{h - 6}" rx="{clip_rx}"/>'
+        f"</clipPath></defs>"
+    )
+    inner = (
+        f'<text x="24" y="30">{esc(prompt_top)}</text>'
         + f'<text x="24" y="54">{esc(prompt_bottom)}</text>'
         + "".join(texts)
         + "".join(cursors)
     )
+    body = render_box(w, h, t) + defs + f'<g clip-path="url(#{clip_id})">{inner}</g>'
     return wrap_svg(w, h, body, t, font_size=14, extra_style="".join(keyframes) + reduced_motion_rule)
 
 
@@ -274,6 +346,7 @@ def render_info(card: dict, t: dict) -> str:
             else:
                 label = str(row[0] if row[0] is not None else "")
                 value = str(row[1] if row[1] is not None else "")
+            label, value = fit_pair(label, value, w)
             elements.append(f'<text x="24" y="{y}">{esc(label)}</text>')
             elements.append(f'<text x="{w - 24}" y="{y}" text-anchor="end">{esc(value)}</text>')
             y += 24
@@ -285,8 +358,11 @@ def render_info(card: dict, t: dict) -> str:
 def render_link(card: dict, t: dict) -> str:
     w = clamp_int(card.get("width"), 360, 680, t["width"])
     h = 44
-    label = esc(card.get("label") if card.get("label") is not None else "")
-    value = esc(card.get("value") if card.get("value") is not None else "")
+    raw_label = str(card.get("label") if card.get("label") is not None else "")
+    raw_value = str(card.get("value") if card.get("value") is not None else "")
+    label_txt, value_txt = fit_pair(raw_label, raw_value, w)
+    label = esc(label_txt)
+    value = esc(value_txt)
     body = (
         render_box(w, h, t)
         + f'<text x="24" y="28">{label}</text>'
@@ -338,13 +414,23 @@ def fetch_contribution_days(user: str, token: str, now_year: int) -> dict[str, i
                 "User-Agent": "termcard",
             },
         )
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as err:
+            if err.code == 401:
+                raise RuntimeError("GitHub API returned 401 Unauthorized. Check your token or STREAK_TOKEN secret.") from err
+            if err.code == 403:
+                raise RuntimeError("GitHub API returned 403 Forbidden (rate limit or insufficient token permissions).") from err
+            raise RuntimeError(f"GitHub API HTTP {err.code}: {err.reason}") from err
         if payload.get("errors"):
             raise RuntimeError(f"GitHub GraphQL error: {payload['errors']}")
         return payload["data"]
 
-    created = int(gql("query($u:String!){user(login:$u){createdAt}}", {"u": user})["user"]["createdAt"][:4])
+    user_data = gql("query($u:String!){user(login:$u){createdAt}}", {"u": user}).get("user")
+    if not user_data:
+        raise ValueError(f"GitHub user '{user}' not found. Check the 'user' field in your streak card config.")
+    created = int(user_data["createdAt"][:4])
     cal_query = (
         "query($u:String!,$f:DateTime!,$t:DateTime!){"
         "user(login:$u){contributionsCollection(from:$f,to:$t){"
@@ -362,12 +448,29 @@ def fetch_contribution_days(user: str, token: str, now_year: int) -> dict[str, i
     return days
 
 
-def format_range(start: dt.date | None, end: dt.date | None) -> str:
+def parse_tz_offset(val: object) -> float:
+    try:
+        offset = float(val)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(offset):
+        return 0.0
+    return max(-12.0, min(14.0, offset))
+
+
+def format_range(start: dt.date | None, end: dt.date | None, ref_year: int | None = None) -> str:
     if not start or not end:
         return "-"
+    cur_year = ref_year if ref_year is not None else end.year
     if start == end:
-        return start.strftime("%b %d")
-    return f"{start.strftime('%b %d')} - {end.strftime('%b %d')}"
+        return start.strftime("%b %d") if start.year == cur_year else start.strftime("%b %d, %Y")
+    if start.year == end.year:
+        if end.year == cur_year:
+            return f"{start.strftime('%b %d')} - {end.strftime('%b %d')}"
+        return f"{start.strftime('%b %d')} - {end.strftime('%b %d, %Y')}"
+    s_fmt = start.strftime("%b %d '%y")
+    e_fmt = end.strftime("%b %d '%y")
+    return f"{s_fmt} - {e_fmt}"
 
 
 def resolve_streak_user(card: dict) -> str:
@@ -377,29 +480,45 @@ def resolve_streak_user(card: dict) -> str:
     return os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
 
 
-def render_streak(card: dict, t: dict, token: str, days_override: dict[str, int] | None = None) -> str:
+def render_streak(
+    card: dict,
+    t: dict,
+    token: str,
+    days_override: dict[str, int] | None = None,
+    days_cache: dict[tuple[str, int], dict[str, int]] | None = None,
+) -> str:
     w = clamp_int(card.get("width"), 360, 680, t["width"])
     h = 170
     mid = w / 2
     left_cx = w / 4
     right_cx = w * 3 / 4
 
-    tz_offset = int(card.get("timezone_offset", 0))
+    tz_offset = parse_tz_offset(card.get("timezone_offset", 0))
     now_local = dt.datetime.now(dt.timezone.utc).astimezone(dt.timezone(dt.timedelta(hours=tz_offset)))
     today = now_local.date()
 
     if days_override is not None:
         days = days_override
-    elif card.get("demo_days"):
-        days = {str(k): int(v) for k, v in card["demo_days"].items()}
-        today = max(dt.date.fromisoformat(k) for k in days)
+    elif "demo_days" in card and card["demo_days"] is not None:
+        raw_demo = card["demo_days"]
+        if isinstance(raw_demo, dict) and raw_demo:
+            days = {str(k): int(v) for k, v in raw_demo.items()}
+            today = max(dt.date.fromisoformat(k) for k in days)
+        else:
+            days = {}
     else:
         user = resolve_streak_user(card)
         if not user:
             raise ValueError("Streak card requires 'user' (or GITHUB_REPOSITORY_OWNER in Actions)")
         if not token:
             raise ValueError("Streak card requires GITHUB_TOKEN (or pass --skip-streak for offline builds)")
-        days = fetch_contribution_days(user, token, today.year)
+        cache_key = (user, today.year)
+        if days_cache is not None and cache_key in days_cache:
+            days = days_cache[cache_key]
+        else:
+            days = fetch_contribution_days(user, token, today.year)
+            if days_cache is not None:
+                days_cache[cache_key] = days
 
     cur, best = compute_streaks(days, today)
     title = esc(card.get("title") or "Streak")
@@ -421,13 +540,33 @@ def render_streak(card: dict, t: dict, token: str, days_override: dict[str, int]
         parts.append(f'<text x="{cx:g}" y="146" text-anchor="middle">{unit}</text>')
         parts.append(
             f'<text x="{cx:g}" y="164" text-anchor="middle" font-size="12" fill="{esc(t["muted"])}">'
-            f"{esc(format_range(data[1], data[2]))}</text>"
+            f"{esc(format_range(data[1], data[2], ref_year=today.year))}</text>"
         )
 
     return wrap_svg(w, h, "".join(parts), t, font_size=15, extra_h=36)
 
 
-def update_readme(readme_path: Path, entries: list[tuple[str, str | None, str, int]]) -> bool:
+def resolve_output_path(output_dir: Path, filename: str) -> Path:
+    raw = str(filename or "").strip()
+    if not raw or "\\" in raw:
+        raise ValueError(f"Invalid output filename: {filename!r}")
+    rel = Path(raw)
+    if rel.is_absolute():
+        raise ValueError(f"Output filename must be relative: {filename!r}")
+    if raw == MANIFEST_NAME or rel.name == MANIFEST_NAME:
+        raise ValueError(f"Output filename cannot overwrite manifest: {filename!r}")
+    base_resolved = output_dir.resolve()
+    dest = (output_dir / rel).resolve()
+    if dest == base_resolved or not dest.is_relative_to(base_resolved):
+        raise ValueError(f"Output path escapes output directory: {filename!r}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return dest
+
+
+def update_readme(
+    readme_path: Path,
+    entries: list[tuple[str | dict[str, str], str | None, str, int]],
+) -> bool:
     start_marker = "<!-- TERMCARD:START -->"
     end_marker = "<!-- TERMCARD:END -->"
     if not readme_path.exists():
@@ -438,8 +577,19 @@ def update_readme(readme_path: Path, entries: list[tuple[str, str | None, str, i
 
     lines = ['<p align="center">']
     for idx, (rel_src, url, alt, width) in enumerate(entries):
-        img = f'<img src="{esc(rel_src)}" width="{width}" alt="{esc(alt)}">'
-        tag = f'<a href="{esc(url)}">{img}</a>' if url else img
+        if isinstance(rel_src, dict):
+            dark_src = esc(rel_src["dark"])
+            light_src = esc(rel_src["light"])
+            media = (
+                "<picture>"
+                f'<source media="(prefers-color-scheme: dark)" srcset="{dark_src}">'
+                f'<source media="(prefers-color-scheme: light)" srcset="{light_src}">'
+                f'<img src="{dark_src}" width="{width}" alt="{esc(alt)}">'
+                "</picture>"
+            )
+        else:
+            media = f'<img src="{esc(rel_src)}" width="{width}" alt="{esc(alt)}">'
+        tag = f'<a href="{esc(url)}">{media}</a>' if url else media
         suffix = "<br>" if idx < len(entries) - 1 else ""
         lines.append(f"  {tag}{suffix}")
     lines.append("</p>")
@@ -455,51 +605,102 @@ def update_readme(readme_path: Path, entries: list[tuple[str, str | None, str, i
     return True
 
 
+def _clean_stale_outputs(output_dir: Path, written: list[Path]) -> None:
+    base_resolved = output_dir.resolve()
+    current_rel = sorted(p.resolve().relative_to(base_resolved).as_posix() for p in written)
+    manifest_path = output_dir / MANIFEST_NAME
+    old_files: list[str] = []
+    if manifest_path.exists():
+        try:
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict) and isinstance(loaded.get("files"), list):
+                old_files = [str(item) for item in loaded["files"]]
+        except (OSError, ValueError, TypeError):
+            old_files = []
+
+    current_set = set(current_rel)
+    for old_rel in old_files:
+        if old_rel in current_set:
+            continue
+        try:
+            stale = resolve_output_path(output_dir, old_rel)
+        except ValueError:
+            continue
+        if stale.exists() and stale.is_file():
+            stale.unlink()
+
+    manifest_path.write_text(json.dumps({"version": 1, "files": current_rel}, indent=2) + "\n", encoding="utf-8")
+
+
 def build_cards(
     config_path: Path,
     output_dir: Path,
     token: str = "",
     skip_streak: bool = False,
     readme_path: Path | None = None,
+    clean: bool = True,
 ) -> list[Path]:
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    theme = resolve_theme(config)
+    themes = resolve_themes(config)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     written: list[Path] = []
-    readme_entries: list[tuple[str, str | None, str, int]] = []
+    readme_entries: list[tuple[str | dict[str, str], str | None, str, int]] = []
+    days_cache: dict[tuple[str, int], dict[str, int]] = {}
+
     for idx, card in enumerate(config.get("cards", [])):
         ctype = card.get("type")
-        filename = card.get("output") or f"{ctype}-{idx + 1}.svg"
-        dest = output_dir / filename
-        card_width = clamp_int(card.get("width"), 360, 680, theme["width"])
-
-        if ctype == "typing":
-            svg = render_typing(card, theme)
-            alt = card.get("alt", "Typing banner")
-        elif ctype == "info":
-            svg = render_info(card, theme)
-            alt = card.get("alt", "Profile info")
-        elif ctype == "link":
-            svg = render_link(card, theme)
-            alt = card.get("alt", card.get("label", "Link"))
-        elif ctype == "streak":
-            if skip_streak and not card.get("demo_days"):
-                continue
-            svg = render_streak(card, theme, token)
-            alt = card.get("alt", "GitHub streak")
-        else:
+        base_filename = card.get("output") or f"{ctype}-{idx + 1}.svg"
+        if ctype not in ("typing", "info", "link", "streak"):
             raise ValueError(f"Unsupported card type: {ctype}")
+        if ctype == "streak" and skip_streak and not card.get("demo_days"):
+            continue
 
-        dest.write_text(svg, encoding="utf-8")
-        written.append(dest)
-        rel_src = dest.as_posix()
-        if readme_path:
-            rel_src = os.path.relpath(dest.resolve(), readme_path.resolve().parent).replace(os.sep, "/")
-        readme_entries.append((rel_src, card.get("url"), alt, card_width))
+        variant_srcs: dict[str, str] = {}
+        single_src: str | None = None
+        card_width = clamp_int(card.get("width"), 360, 680, themes[0][1]["width"])
+        alt = ""
+
+        for variant, theme in themes:
+            filename = variant_filename(base_filename, variant)
+            dest = resolve_output_path(output_dir, filename)
+            rel_out = output_dir / filename
+
+            if ctype == "typing":
+                svg = render_typing(card, theme)
+                alt = card.get("alt", "Typing banner")
+            elif ctype == "info":
+                svg = render_info(card, theme)
+                alt = card.get("alt", "Profile info")
+            elif ctype == "link":
+                svg = render_link(card, theme)
+                alt = card.get("alt", card.get("label", "Link"))
+            else:
+                svg = render_streak(card, theme, token, days_cache=days_cache)
+                alt = card.get("alt", "GitHub streak")
+
+            dest.write_text(svg, encoding="utf-8")
+            written.append(rel_out)
+            if readme_path:
+                rel_src = os.path.relpath(dest.resolve(), readme_path.resolve().parent).replace(os.sep, "/")
+            else:
+                rel_src = rel_out.as_posix()
+
+            if variant is None:
+                single_src = rel_src
+            else:
+                variant_srcs[variant] = rel_src
+
+        if variant_srcs:
+            readme_entries.append((variant_srcs, card.get("url"), alt, card_width))
+        elif single_src is not None:
+            readme_entries.append((single_src, card.get("url"), alt, card_width))
 
     if readme_path and readme_entries:
         update_readme(readme_path, readme_entries)
+
+    if clean and not skip_streak:
+        _clean_stale_outputs(output_dir, written)
 
     return written
 
@@ -510,6 +711,7 @@ def main() -> int:
     parser.add_argument("--out", default="assets", help="Output directory for generated SVGs.")
     parser.add_argument("--readme", default="", help="Optional README.md to update between TERMCARD markers.")
     parser.add_argument("--skip-streak", action="store_true", help="Skip live GitHub streak API calls.")
+    parser.add_argument("--no-clean", action="store_true", help="Keep previously generated SVGs not in the current config.")
     args = parser.parse_args()
 
     token = os.environ.get("GITHUB_TOKEN", "").strip()
@@ -520,6 +722,7 @@ def main() -> int:
         token=token,
         skip_streak=args.skip_streak,
         readme_path=readme_path,
+        clean=not args.no_clean,
     )
     for path in written:
         print(f"Generated {path}")

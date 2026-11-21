@@ -1,4 +1,5 @@
 {
+  "$schema": "https://raw.githubusercontent.com/bagasadh/termcard/main/termcard.schema.json",
   "theme": "dashed-dark",
   "width": 560,
   "radius": 6,

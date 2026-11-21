@@ -25,6 +25,10 @@ inputs:
     description: Automatically commit and push changed SVG files.
     required: false
     default: "true"
+  clean:
+    description: Remove previously generated termcard SVGs that are no longer in the config.
+    required: false
+    default: "true"
   commit_message:
     description: Commit message used when commit is true.
     required: false
@@ -40,10 +44,14 @@ runs:
         TC_CONFIG: ${{ inputs.config }}
         TC_OUT: ${{ inputs.output_dir }}
         TC_README: ${{ inputs.readme }}
+        TC_CLEAN: ${{ inputs.clean }}
       run: |
         args=(--config "$TC_CONFIG" --out "$TC_OUT")
         if [ -n "$TC_README" ]; then
           args+=(--readme "$TC_README")
+        fi
+        if [ "$TC_CLEAN" != "true" ]; then
+          args+=(--no-clean)
         fi
         python3 "${{ github.action_path }}/termcard.py" "${args[@]}"
 
@@ -57,9 +65,13 @@ runs:
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git add "$TC_OUT"
+        git add -A "$TC_OUT"
         if [ -n "$TC_README" ] && [ -f "$TC_README" ]; then
           git add "$TC_README"
         fi
-        git diff --cached --quiet || (git commit -m "$TC_MSG" && git push)
+        if ! git diff --cached --quiet; then
+          git commit -m "$TC_MSG"
+          git pull --rebase
+          git push
+        fi
 

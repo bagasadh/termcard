@@ -79,19 +79,82 @@ export function escapeXml(value) {
     .replace(/"/g, "&quot;");
 }
 
-export function resolveTheme(config) {
-  const base = { ...(THEMES[config.theme] || THEMES["dashed-dark"]) };
+export function truncateText(text, maxLen) {
+  const chars = Array.from(String(text ?? ""));
+  if (maxLen <= 0) return "";
+  if (chars.length <= maxLen) return chars.join("");
+  if (maxLen <= 3) return chars.slice(0, maxLen).join("");
+  return `${chars.slice(0, maxLen - 3).join("").trimEnd()}...`;
+}
+
+export function fitPair(label, value, width) {
+  const lStr = String(label ?? "");
+  const vStr = String(value ?? "");
+  const maxTotal = Math.max(6, Math.floor(((width - 48) * 10) / 84) - 2);
+  const lLen = Array.from(lStr).length;
+  const vLen = Array.from(vStr).length;
+  if (lLen + vLen <= maxTotal) return [lStr, vStr];
+  if (vLen === 0) return [truncateText(lStr, maxTotal), ""];
+  if (lLen === 0) return ["", truncateText(vStr, maxTotal)];
+  const halfLabel = Math.max(4, Math.floor((maxTotal * 4) / 10));
+  const halfValue = maxTotal - halfLabel;
+  if (lLen <= halfLabel) return [lStr, truncateText(vStr, maxTotal - lLen)];
+  if (vLen <= halfValue) return [truncateText(lStr, maxTotal - vLen), vStr];
+  return [truncateText(lStr, halfLabel), truncateText(vStr, halfValue)];
+}
+
+export function resolveThemeVariant(config, themeName, mode = null) {
+  const base = { ...(THEMES[themeName] || THEMES["dashed-dark"]) };
   base.width = clampInt(config.width, 360, 680, 560);
   base.radius = clampInt(config.radius, 0, 20, 6);
   base.font = config.font || DEFAULT_FONT;
-  if (config.style) {
-    for (const [key, val] of Object.entries(config.style)) {
+  const style = config.style;
+  if (style && typeof style === "object") {
+    let override = {};
+    if ((mode === "dark" || mode === "light") && style[mode] && typeof style[mode] === "object") {
+      override = style[mode];
+    } else if (mode === "light") {
+      override = {};
+    } else {
+      for (const [key, val] of Object.entries(style)) {
+        if (!val || typeof val !== "object") {
+          override[key] = val;
+        }
+      }
+    }
+    for (const [key, val] of Object.entries(override)) {
       if (val !== undefined && val !== null && val !== "") {
         base[key] = val;
       }
     }
   }
   return base;
+}
+
+export function resolveThemes(config) {
+  const rawTheme = config.theme ?? "dashed-dark";
+  if (rawTheme && typeof rawTheme === "object") {
+    const darkName = String(rawTheme.dark || "dashed-dark");
+    const lightName = String(rawTheme.light || "dashed-light");
+    return [
+      ["dark", resolveThemeVariant(config, darkName, "dark")],
+      ["light", resolveThemeVariant(config, lightName, "light")],
+    ];
+  }
+  const name = String(rawTheme || "dashed-dark");
+  return [[null, resolveThemeVariant(config, name, null)]];
+}
+
+export function resolveTheme(config) {
+  return resolveThemes(config)[0][1];
+}
+
+export function variantFilename(filename, variant) {
+  if (!variant) return filename;
+  if (filename.toLowerCase().endsWith(".svg")) {
+    return `${filename.slice(0, -4)}-${variant}.svg`;
+  }
+  return `${filename}-${variant}`;
 }
 
 function clampInt(val, min, max, fallback) {
@@ -160,27 +223,35 @@ export function renderTyping(card, t, { paused = false } = {}) {
   const h = 68;
   const promptTop = card.prompt_top ?? `┌ ${card.user || "your-username"}`;
   const promptBottom = card.prompt_bottom ?? "└›";
+  const promptBottomChars = Array.from(String(promptBottom));
   const rawWords = Array.isArray(card.words)
     ? card.words
     : String(card.words || "Hi, fastfetch").split(",");
   const words = rawWords.map((s) => String(s).trim()).filter(Boolean);
   if (!words.length) words.push("Hi");
+  const wordCharsList = words.map((word) => Array.from(word));
   const duration = Math.max(2, Number(card.duration) || Math.max(6, words.length * 4));
   const charW = 8.4;
-  const startX = 24 + (promptBottom.length + 1) * charW;
+  const startX = 24 + (promptBottomChars.length + 1) * charW;
+  const clipId = `tc-clip-${w}-${t.radius}`;
+  const clipRx = Math.max(0, Number(t.radius) - 1);
+  const defs =
+    `<defs><clipPath id="${clipId}">` +
+    `<rect x="12" y="4" width="${w - 24}" height="${h - 6}" rx="${clipRx}"/>` +
+    `</clipPath></defs>`;
 
   if (paused) {
-    const first = words[0];
-    const staticChars = [...first]
+    const firstChars = wordCharsList[0];
+    const staticChars = firstChars
       .map((ch, i) => `<text x="${(startX + i * charW).toFixed(1)}" y="54">${escapeXml(ch)}</text>`)
       .join("");
-    const cursorX = (startX + first.length * charW).toFixed(1);
-    const body =
-      renderBox(w, h, t) +
+    const cursorX = (startX + firstChars.length * charW).toFixed(1);
+    const inner =
       `<text x="24" y="30">${escapeXml(promptTop)}</text>` +
       `<text x="24" y="54">${escapeXml(promptBottom)}</text>` +
       staticChars +
       `<rect fill="${escapeXml(t.text)}" x="${cursorX}" y="41" width="1.5" height="16"/>`;
+    const body = renderBox(w, h, t) + defs + `<g clip-path="url(#${clipId})">${inner}</g>`;
     return wrapSvg(w, h, body, t, 14);
   }
 
@@ -193,18 +264,18 @@ export function renderTyping(card, t, { paused = false } = {}) {
     cursorSpans.get(col).push(span);
   };
 
-  words.forEach((word, wIdx) => {
+  wordCharsList.forEach((wordChars, wIdx) => {
     step += 2;
     const typeStarts = [];
-    for (let c = 0; c < word.length; c += 1) {
+    for (let c = 0; c < wordChars.length; c += 1) {
       addSpan(c, [step, step + 1, false]);
       step += 1;
       typeStarts.push(step);
     }
     const holdEnd = step + 8;
-    addSpan(word.length, [step, holdEnd, true]);
+    addSpan(wordChars.length, [step, holdEnd, true]);
     step = holdEnd;
-    for (let c = word.length - 1; c >= 0; c -= 1) {
+    for (let c = wordChars.length - 1; c >= 0; c -= 1) {
       const delAt = step;
       timeline.push([wIdx, c, typeStarts[c], delAt]);
       addSpan(c, [delAt, delAt + 1, false]);
@@ -221,7 +292,7 @@ export function renderTyping(card, t, { paused = false } = {}) {
     const pOn = ((sOn / total) * 100).toFixed(2);
     const pOff = ((sOff / total) * 100).toFixed(2);
     keyframes.push(`@keyframes l${idx}{0%{opacity:0}${pOn}%{opacity:1}${pOff}%{opacity:0}}`);
-    const ch = escapeXml(words[wIdx][cIdx]);
+    const ch = escapeXml(wordCharsList[wIdx][cIdx]);
     const x = (startX + cIdx * charW).toFixed(1);
     const cls = wIdx === 0 ? ' class="r"' : "";
     texts.push(
@@ -250,7 +321,7 @@ export function renderTyping(card, t, { paused = false } = {}) {
     }
     keyframes.push(`@keyframes c${col}{${stops.join("")}}`);
     const x = (startX + col * charW).toFixed(1);
-    const cls = col === words[0].length ? ' class="r"' : "";
+    const cls = col === wordCharsList[0].length ? ' class="r"' : "";
     cursors.push(
       `<rect fill="${escapeXml(t.text)}" x="${x}" y="41" width="1.5" height="16" opacity="0"${cls}` +
         ` style="animation:c${col} ${duration}s step-end infinite"/>`
@@ -260,12 +331,12 @@ export function renderTyping(card, t, { paused = false } = {}) {
   const reducedMotionRule =
     "@media (prefers-reduced-motion: reduce){text,rect{animation:none !important}.r{opacity:1 !important}}";
 
-  const body =
-    renderBox(w, h, t) +
+  const inner =
     `<text x="24" y="30">${escapeXml(promptTop)}</text>` +
     `<text x="24" y="54">${escapeXml(promptBottom)}</text>` +
     texts.join("") +
     cursors.join("");
+  const body = renderBox(w, h, t) + defs + `<g clip-path="url(#${clipId})">${inner}</g>`;
 
   return wrapSvg(w, h, body, t, 14, keyframes.join("") + reducedMotionRule);
 }
@@ -288,8 +359,9 @@ export function renderInfo(card, t) {
       y += 12;
     }
     for (const row of rows) {
-      const label = Array.isArray(row) ? (row[0] ?? "") : (row.label ?? "");
-      const value = Array.isArray(row) ? (row[1] ?? "") : (row.value ?? "");
+      const rawLabel = Array.isArray(row) ? (row[0] ?? "") : (row.label ?? "");
+      const rawValue = Array.isArray(row) ? (row[1] ?? "") : (row.value ?? "");
+      const [label, value] = fitPair(rawLabel, rawValue, w);
       elements.push(`<text x="24" y="${y}">${escapeXml(label)}</text>`);
       elements.push(`<text x="${w - 24}" y="${y}" text-anchor="end">${escapeXml(value)}</text>`);
       y += 24;
@@ -303,11 +375,12 @@ export function renderInfo(card, t) {
 export function renderLink(card, t) {
   const w = clampInt(card.width, 360, 680, t.width);
   const h = 44;
+  const [label, value] = fitPair(card.label ?? "", card.value ?? "", w);
   const body =
     renderBox(w, h, t) +
-    `<text x="24" y="28">${escapeXml(card.label ?? "")}</text>` +
+    `<text x="24" y="28">${escapeXml(label)}</text>` +
     `<text x="${w - 24}" y="28" text-anchor="end" fill="${escapeXml(t.link)}" text-decoration="underline">` +
-    `${escapeXml(card.value ?? "")}</text>`;
+    `${escapeXml(value)}</text>`;
   return wrapSvg(w, h, body, t, 14);
 }
 
@@ -371,28 +444,55 @@ export function renderCard(card, theme, opts = {}) {
 }
 
 export function buildExportConfig(state) {
-  const out = {
-    theme: state.theme,
-    width: clampInt(state.width, 360, 680, 560),
-    radius: clampInt(state.radius, 0, 20, 6),
-  };
+  const out = {};
+  if (state.schemaUrl) {
+    out.$schema = state.schemaUrl;
+  }
+  out.theme = state.dualTheme
+    ? { dark: state.theme, light: state.lightTheme || "dashed-light" }
+    : state.theme;
+  out.width = clampInt(state.width, 360, 680, 560);
+  out.radius = clampInt(state.radius, 0, 20, 6);
+  if (state.font && String(state.font).trim() !== "" && state.font !== DEFAULT_FONT) {
+    out.font = state.font;
+  }
 
-  if (state.useCustomColors && state.style) {
-    const cleanStyle = {};
-    for (const [k, v] of Object.entries(state.style)) {
-      if (v !== undefined && v !== null && String(v).trim() !== "") {
-        cleanStyle[k] = v;
+  const styleOut = {};
+  if (state.extraStyle && typeof state.extraStyle === "object") {
+    for (const [k, v] of Object.entries(state.extraStyle)) {
+      if (v !== undefined && v !== null && v !== "") {
+        styleOut[k] = typeof v === "object" ? { ...v } : v;
       }
     }
-    if (Object.keys(cleanStyle).length) out.style = cleanStyle;
+  }
+  if (state.useCustomColors && state.style) {
+    const cleanColors = {};
+    for (const [k, v] of Object.entries(state.style)) {
+      if (v !== undefined && v !== null && String(v).trim() !== "") {
+        cleanColors[k] = v;
+      }
+    }
+    if (state.dualTheme && (styleOut.dark || styleOut.light)) {
+      styleOut.dark = { ...(styleOut.dark || {}), ...cleanColors };
+    } else {
+      Object.assign(styleOut, cleanColors);
+    }
+  }
+  if (Object.keys(styleOut).length) {
+    out.style = styleOut;
   }
 
   out.cards = state.cards.map((card, idx) => {
     const output = (card.output || `${card.type}-${idx + 1}.svg`).trim();
+    const extraWidth =
+      card.width !== undefined && card.width !== null && card.width !== ""
+        ? { width: clampInt(card.width, 360, 680, out.width) }
+        : {};
     if (card.type === "typing") {
       return {
         type: "typing",
         output,
+        ...extraWidth,
         prompt_top: card.prompt_top,
         prompt_bottom: card.prompt_bottom,
         words: card.words.map((w) => w.trim()).filter(Boolean),
@@ -404,25 +504,36 @@ export function buildExportConfig(state) {
       return {
         type: "info",
         output,
+        ...extraWidth,
         alt: card.alt || "Profile info",
         sections: card.sections.map((sec) => sec.map(([k, v]) => [k, v])),
       };
     }
     if (card.type === "streak") {
-      return {
+      const tz = Number(card.timezone_offset);
+      const streakOut = {
         type: "streak",
         output,
+        ...extraWidth,
         user: (card.user || "your-username").trim(),
-        timezone_offset: Number(card.timezone_offset) || 0,
+        timezone_offset: Number.isFinite(tz) ? tz : 0,
         title: card.title || "Streak",
         current_label: card.current_label || "Current streak",
         longest_label: card.longest_label || "Longest streak",
-        alt: card.alt || "GitHub streak",
       };
+      if (card.unit && String(card.unit).trim() && String(card.unit).trim() !== "days") {
+        streakOut.unit = String(card.unit).trim();
+      }
+      if (card.demo_days && typeof card.demo_days === "object" && Object.keys(card.demo_days).length) {
+        streakOut.demo_days = { ...card.demo_days };
+      }
+      streakOut.alt = card.alt || "GitHub streak";
+      return streakOut;
     }
     return {
       type: "link",
       output,
+      ...extraWidth,
       label: card.label || "Email",
       value: card.value || "you@example.com",
       url: card.url || "",
@@ -447,6 +558,10 @@ on:
 
 permissions:
   contents: write
+
+concurrency:
+  group: termcard-\${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:

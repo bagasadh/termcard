@@ -492,6 +492,11 @@ function drawTypingCard(ctx, item, x, y, dw, dh, timeSec, paused) {
   ctx.stroke();
   ctx.restore();
 
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(12, 4, w - 24, h - 6);
+  ctx.clip();
+
   ctx.font = fnt(400, 14, FONTS.mono);
   ctx.fillStyle = t.text;
   ctx.textBaseline = "alphabetic";
@@ -514,6 +519,7 @@ function drawTypingCard(ctx, item, x, y, dw, dh, timeSec, paused) {
     const cursorX = startX + (typedText ? ctx.measureText(typedText).width : 0);
     ctx.fillRect(cursorX, 41, 1.5, 16);
   }
+  ctx.restore();
 
   ctx.restore();
 }
@@ -602,7 +608,7 @@ export function initCanvas(o) {
   const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const coarse = matchMedia("(pointer: coarse)").matches;
   const canAim = matchMedia("(any-pointer: fine)").matches;
-  o.hint.textContent = coarse && !canAim ? "SWIPE TO EXPLORE" : "DRAG \u00b7 ARROWS \u00b7 \u21b5 OPEN";
+  o.hint.textContent = coarse && !canAim ? "SWIPE TO EXPLORE" : "DRAG \u00b7 ARROWS \u00b7 B BUILDER \u00b7 \u21b5 OPEN";
 
   let canvasEl = document.createElement("canvas");
   stage.replaceChildren(canvasEl);

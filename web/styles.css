@@ -365,6 +365,15 @@ pre,
   flex-shrink: 0;
 }
 
+.dual-theme-row {
+  margin-bottom: 14px;
+}
+
+.dual-theme-select {
+  margin-top: 8px;
+  padding-left: 28px;
+}
+
 .range-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -712,6 +721,12 @@ input[type="range"] {
   margin-bottom: 14px;
   padding-bottom: 12px;
   border-bottom: 1px dashed var(--hairline);
+}
+
+.gh-quick-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 0.8fr);
+  gap: 10px;
 }
 
 .gh-user-hint {
@@ -1172,6 +1187,17 @@ input[type="range"] {
   border-color: var(--accent-hover);
 }
 
+.hud-kbd {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.2;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid color-mix(in srgb, currentColor 65%, var(--text));
+  color: inherit;
+}
+
 .hud-pill[aria-pressed="true"] {
   background: var(--text);
   color: var(--bg);
@@ -1546,9 +1572,14 @@ input[type="range"] {
 
   .range-row,
   .two-col,
+  .gh-quick-grid,
   .info-row-grid,
   .setup-steps {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dual-theme-select {
+    padding-left: 0;
   }
 
   .setup-steps {

@@ -1,6 +1,8 @@
 import {
   THEMES,
   resolveTheme,
+  resolveThemes,
+  variantFilename,
   renderCard,
   renderInfo,
   renderStreak,
@@ -14,13 +16,63 @@ import { createSound } from "./sound.js";
 
 let nextId = 1;
 const uid = () => `c${nextId++}`;
+const COLOR_KEYS = new Set(["bg", "stroke", "text", "muted", "link"]);
+
+function extractImportedStyle(rawStyle, baseTheme) {
+  const colors = {
+    bg: baseTheme.bg,
+    stroke: baseTheme.stroke,
+    text: baseTheme.text,
+    muted: baseTheme.muted,
+    link: baseTheme.link,
+  };
+  let useCustomColors = false;
+  const extraStyle = {};
+  if (!rawStyle || typeof rawStyle !== "object") {
+    return { colors, useCustomColors, extraStyle };
+  }
+
+  const darkObj = rawStyle.dark && typeof rawStyle.dark === "object" ? rawStyle.dark : null;
+  if (darkObj) {
+    const nonColorDark = {};
+    for (const [k, v] of Object.entries(darkObj)) {
+      if (COLOR_KEYS.has(k) && v !== undefined && v !== null && String(v).trim() !== "") {
+        colors[k] = v;
+        useCustomColors = true;
+      } else if (v !== undefined && v !== null && v !== "") {
+        nonColorDark[k] = v;
+      }
+    }
+    if (Object.keys(nonColorDark).length) extraStyle.dark = nonColorDark;
+  }
+
+  for (const [k, v] of Object.entries(rawStyle)) {
+    if (k === "dark") continue;
+    if (k === "light" && v && typeof v === "object") {
+      extraStyle.light = { ...v };
+      continue;
+    }
+    if (!darkObj && COLOR_KEYS.has(k) && v !== undefined && v !== null && String(v).trim() !== "") {
+      colors[k] = v;
+      useCustomColors = true;
+    } else if (v !== undefined && v !== null && v !== "") {
+      extraStyle[k] = typeof v === "object" ? { ...v } : v;
+    }
+  }
+  return { colors, useCustomColors, extraStyle };
+}
 
 function createStarterState() {
   return {
+    schemaUrl: "",
     theme: "dashed-dark",
+    dualTheme: false,
+    lightTheme: "dashed-light",
     width: 560,
     radius: 6,
+    font: "",
     useCustomColors: false,
+    extraStyle: {},
     style: {
       bg: THEMES["dashed-dark"].bg,
       stroke: THEMES["dashed-dark"].stroke,
@@ -65,6 +117,7 @@ function createStarterState() {
         title: "Streak",
         current_label: "Current streak",
         longest_label: "Longest streak",
+        unit: "days",
         preview_current: 7,
         preview_longest: 14,
         alt: "GitHub streak",
@@ -93,6 +146,7 @@ let previewBackdrop = "dark";
 let pageTheme = "dark";
 let includePrivatePat = false;
 let deployUser = "";
+let deployBranch = "main";
 let sheetOpen = false;
 let sheetOpenedAt = 0;
 let lastFocusBeforeSheet = null;
@@ -121,7 +175,11 @@ const el = {
   skipToBuilder: document.getElementById("skip-to-builder"),
   motionToggle: document.getElementById("motion-toggle"),
   themeToggle: document.getElementById("theme-toggle"),
+  themeLegend: document.getElementById("theme-legend"),
   themePicker: document.getElementById("theme-picker"),
+  dualThemeToggle: document.getElementById("dual-theme-toggle"),
+  lightThemePickerWrap: document.getElementById("light-theme-picker-wrap"),
+  lightThemeSelect: document.getElementById("light-theme-select"),
   widthInput: document.getElementById("card-width"),
   widthOut: document.getElementById("card-width-val"),
   radiusInput: document.getElementById("card-radius"),
@@ -140,9 +198,11 @@ const el = {
   statusBanner: document.getElementById("status-banner"),
   errorBanner: document.getElementById("error-banner"),
   ghDeployUser: document.getElementById("gh-deploy-user"),
+  ghDeployBranch: document.getElementById("gh-deploy-branch"),
   ghUserHint: document.getElementById("gh-user-hint"),
   ghCreateJsonBtn: document.getElementById("gh-create-json-btn"),
   ghCreateYamlBtn: document.getElementById("gh-create-yaml-btn"),
+  ghEditReadmeBtn: document.getElementById("gh-edit-readme-btn"),
   outputJson: document.getElementById("output-json"),
   outputYaml: document.getElementById("output-yaml"),
   outputMarkers: document.getElementById("output-markers"),
@@ -182,6 +242,13 @@ function validateState() {
     const out = (card.output || "").trim();
     if (!out || !out.endsWith(".svg")) {
       errors.push(`${label} output filename must end with .svg.`);
+    } else if (
+      out.startsWith("/") ||
+      out.includes("\\") ||
+      /(^|\/)\.\.($|\/)/.test(out) ||
+      out.endsWith(".termcard-manifest.json")
+    ) {
+      errors.push(`${label} output filename must be a safe relative path.`);
     } else if (seenOutputs.has(out)) {
       errors.push(`Duplicate output filename "${out}".`);
     } else {
@@ -200,13 +267,14 @@ function validateState() {
 
 function getSpecimen(key) {
   if (key === "live") {
-    const resolvedTheme = resolveTheme({
-      theme: state.theme,
-      width: state.width,
-      radius: state.radius,
-      style: state.useCustomColors ? state.style : undefined,
-    });
+    const exportCfg = buildExportConfig(state);
+    const variants = resolveThemes(exportCfg);
+    const baseTheme =
+      state.dualTheme && previewBackdrop === "light" && variants[1]
+        ? variants[1][1]
+        : variants[0][1];
     const items = state.cards.slice(0, 4).map((card) => {
+      const cardTheme = card.width ? { ...baseTheme, width: card.width } : baseTheme;
       if (card.type === "typing") {
         return {
           type: "typing",
@@ -216,10 +284,10 @@ function getSpecimen(key) {
             words: Array.isArray(card.words) ? [...card.words] : ["Hi"],
             duration: card.duration || 8,
           },
-          theme: resolvedTheme,
+          theme: cardTheme,
         };
       }
-      return { type: "svg", svg: renderCard(card, resolvedTheme, { paused: true }) };
+      return { type: "svg", svg: renderCard(card, cardTheme, { paused: true }) };
     });
     return { stage: previewBackdrop, items };
   }
@@ -367,16 +435,25 @@ function renderThemePicker() {
   }
 }
 
+function populateLightThemeSelect() {
+  el.lightThemeSelect.innerHTML = "";
+  for (const [key, theme] of Object.entries(THEMES)) {
+    const opt = document.createElement("option");
+    opt.value = key;
+    opt.textContent = theme.label;
+    el.lightThemeSelect.appendChild(opt);
+  }
+  el.lightThemeSelect.value = THEMES[state.lightTheme] ? state.lightTheme : "dashed-light";
+}
+
 function selectCardTheme(key, announce = false) {
   if (!THEMES[key]) return;
   state.theme = key;
   if (!state.useCustomColors) {
     syncColorInputsFromTheme(key);
   }
-  if (key.includes("light")) {
-    setPreviewBackdrop("light");
-  } else {
-    setPreviewBackdrop("dark");
+  if (!state.dualTheme) {
+    setPreviewBackdrop(key.includes("light") ? "light" : "dark");
   }
   renderThemePicker();
   renderPreviewAndExport();
@@ -411,6 +488,12 @@ function syncCustomColorsDisabled() {
 }
 
 function syncFrameControls() {
+  el.dualThemeToggle.checked = Boolean(state.dualTheme);
+  el.lightThemePickerWrap.hidden = !state.dualTheme;
+  if (el.themeLegend) {
+    el.themeLegend.textContent = state.dualTheme ? "Dark mode theme" : "Preset theme";
+  }
+  el.lightThemeSelect.value = THEMES[state.lightTheme] ? state.lightTheme : "dashed-light";
   el.widthInput.value = String(state.width);
   el.widthOut.textContent = `${state.width}px`;
   el.radiusInput.value = String(state.radius);
@@ -424,7 +507,7 @@ function syncFrameControls() {
   el.styleLink.value = state.style.link;
 }
 
-function makeLabeledInput({ id, labelText, value, type = "text", placeholder = "", onInput }) {
+function makeLabeledInput({ id, labelText, value, type = "text", placeholder = "", step, min, max, onInput }) {
   const wrap = document.createElement("div");
   wrap.className = "field";
   const label = document.createElement("label");
@@ -438,6 +521,9 @@ function makeLabeledInput({ id, labelText, value, type = "text", placeholder = "
   input.className = "text-input";
   input.value = value ?? "";
   if (placeholder) input.placeholder = placeholder;
+  if (step !== undefined) input.step = String(step);
+  if (min !== undefined) input.min = String(min);
+  if (max !== undefined) input.max = String(max);
   input.addEventListener("input", (e) => onInput(e.target.value));
 
   wrap.append(label, input);
@@ -603,6 +689,7 @@ function renderCardsEditor() {
           placeholder: "typing.svg",
           onInput: (v) => {
             card.output = v;
+            fileHint.textContent = v;
             renderPreviewAndExport();
           },
         })
@@ -617,6 +704,7 @@ function renderCardsEditor() {
           placeholder: "info.svg",
           onInput: (v) => {
             card.output = v;
+            fileHint.textContent = v;
             renderPreviewAndExport();
           },
         })
@@ -735,8 +823,12 @@ function renderCardsEditor() {
           labelText: "Timezone offset (hours from UTC)",
           value: card.timezone_offset,
           type: "number",
+          step: "0.5",
+          min: "-12",
+          max: "14",
           onInput: (v) => {
-            card.timezone_offset = Number(v) || 0;
+            const num = Number(v);
+            card.timezone_offset = v.trim() === "" ? 0 : (Number.isFinite(num) ? Math.max(-12, Math.min(14, num)) : 0);
             renderPreviewAndExport();
           },
         })
@@ -762,6 +854,7 @@ function renderCardsEditor() {
           placeholder: "streak.svg",
           onInput: (v) => {
             card.output = v;
+            fileHint.textContent = v;
             renderPreviewAndExport();
           },
         })
@@ -792,7 +885,18 @@ function renderCardsEditor() {
         })
       );
 
-      fields.append(row1, row2, row3);
+      const unitField = makeLabeledInput({
+        id: `${card.id}-unit`,
+        labelText: "Unit label",
+        value: card.unit ?? "days",
+        placeholder: "days",
+        onInput: (v) => {
+          card.unit = v;
+          renderPreviewAndExport();
+        },
+      });
+
+      fields.append(row1, row2, row3, unitField);
     } else if (card.type === "link") {
       const row1 = document.createElement("div");
       row1.className = "two-col";
@@ -839,6 +943,7 @@ function renderCardsEditor() {
           placeholder: "contact-email.svg",
           onInput: (v) => {
             card.output = v;
+            fileHint.textContent = v;
             renderPreviewAndExport();
           },
         })
@@ -855,12 +960,12 @@ function renderCardsEditor() {
 function renderPreviewAndExport() {
   validateState();
 
-  const resolvedTheme = resolveTheme({
-    theme: state.theme,
-    width: state.width,
-    radius: state.radius,
-    style: state.useCustomColors ? state.style : undefined,
-  });
+  const exportConfig = buildExportConfig(state);
+  const resolvedVariants = resolveThemes(exportConfig);
+  const previewTheme =
+    state.dualTheme && previewBackdrop === "light" && resolvedVariants[1]
+      ? resolvedVariants[1][1]
+      : resolvedVariants[0][1];
 
   el.livePreviewStage.innerHTML = "";
   el.svgDownloadList.innerHTML = "";
@@ -872,27 +977,29 @@ function renderPreviewAndExport() {
     el.livePreviewStage.appendChild(note);
   } else {
     state.cards.forEach((card, idx) => {
-      const svg = renderCard(card, resolvedTheme, { paused: typingPaused });
+      const svg = renderCard(card, previewTheme, { paused: typingPaused });
       const item = document.createElement("div");
       item.className = "preview-item";
       item.innerHTML = svg;
       el.livePreviewStage.appendChild(item);
 
-      const filename = (card.output || `${card.type}-${idx + 1}.svg`).trim();
-      const dlBtn = document.createElement("button");
-      dlBtn.type = "button";
-      dlBtn.className = "ctrl-btn";
-      dlBtn.textContent = `Download ${filename}`;
-      dlBtn.addEventListener("click", () => {
-        const exportSvg = renderCard(card, resolvedTheme, { paused: false });
-        downloadTextFile(filename, exportSvg, "image/svg+xml");
-        showStatus(`Downloaded ${filename}.`);
-      });
-      el.svgDownloadList.appendChild(dlBtn);
+      const baseFilename = (card.output || `${card.type}-${idx + 1}.svg`).trim();
+      for (const [variant, variantTheme] of resolvedVariants) {
+        const dlName = variantFilename(baseFilename, variant);
+        const dlBtn = document.createElement("button");
+        dlBtn.type = "button";
+        dlBtn.className = "ctrl-btn";
+        dlBtn.textContent = `Download ${dlName}`;
+        dlBtn.addEventListener("click", () => {
+          const exportSvg = renderCard(card, variantTheme, { paused: false });
+          downloadTextFile(dlName, exportSvg, "image/svg+xml");
+          showStatus(`Downloaded ${dlName}.`);
+        });
+        el.svgDownloadList.appendChild(dlBtn);
+      }
     });
   }
 
-  const exportConfig = buildExportConfig(state);
   const jsonText = `${JSON.stringify(exportConfig, null, 2)}\n`;
   const yamlText = buildWorkflowYaml({ includePrivate: includePrivatePat });
   el.outputJson.textContent = jsonText;
@@ -907,7 +1014,7 @@ function saveToStorage() {
   try {
     localStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify({ state, deployUser, includePrivatePat, previewBackdrop, pageTheme })
+      JSON.stringify({ state, deployUser, deployBranch, includePrivatePat, previewBackdrop, pageTheme })
     );
   } catch {
     // Ignore storage failures in private browsing or restricted contexts.
@@ -923,10 +1030,18 @@ function loadFromStorage() {
     const tKey = THEMES[saved.state.theme] ? saved.state.theme : "dashed-dark";
     const baseT = THEMES[tKey];
     state = {
+      schemaUrl: typeof saved.state.schemaUrl === "string" ? saved.state.schemaUrl : "",
       theme: tKey,
+      dualTheme: Boolean(saved.state.dualTheme),
+      lightTheme: THEMES[saved.state.lightTheme] ? saved.state.lightTheme : "dashed-light",
       width: Number(saved.state.width) || 560,
       radius: Number(saved.state.radius ?? 6),
+      font: typeof saved.state.font === "string" ? saved.state.font : "",
       useCustomColors: Boolean(saved.state.useCustomColors),
+      extraStyle:
+        saved.state.extraStyle && typeof saved.state.extraStyle === "object"
+          ? saved.state.extraStyle
+          : {},
       style: {
         bg: saved.state.style?.bg || baseT.bg,
         stroke: saved.state.style?.stroke || baseT.stroke,
@@ -938,6 +1053,7 @@ function loadFromStorage() {
     };
     openCardIds = new Set(state.cards[0] ? [state.cards[0].id] : []);
     deployUser = typeof saved.deployUser === "string" ? saved.deployUser : "";
+    deployBranch = typeof saved.deployBranch === "string" && saved.deployBranch.trim() ? saved.deployBranch.trim() : "main";
     includePrivatePat = Boolean(saved.includePrivatePat);
     previewBackdrop = saved.previewBackdrop === "light" ? "light" : "dark";
     pageTheme = saved.pageTheme === "light" ? "light" : "dark";
@@ -955,22 +1071,24 @@ function getEffectiveGithubUser() {
 
 function updateGithubQuickLinks(jsonText, yamlText) {
   const user = getEffectiveGithubUser();
+  const branch = deployBranch.trim().replace(/^\/+|\/+$/g, "") || "main";
   const valid = Boolean(user && user.toLowerCase() !== "your-username" && GH_USER_RE.test(user));
+
+  const setDisabledAnchor = (anchor) => {
+    anchor.href = "#gh-deploy-user";
+    anchor.removeAttribute("target");
+    anchor.removeAttribute("rel");
+    anchor.setAttribute("aria-disabled", "true");
+  };
 
   const setLink = (anchor, filename, content) => {
     if (!valid) {
-      anchor.href = "#gh-deploy-user";
-      anchor.removeAttribute("target");
-      anchor.removeAttribute("rel");
-      anchor.setAttribute("aria-disabled", "true");
+      setDisabledAnchor(anchor);
       return true;
     }
-    const url = `https://github.com/${encodeURIComponent(user)}/${encodeURIComponent(user)}/new/main?filename=${encodeURIComponent(filename)}&value=${encodeURIComponent(content)}`;
+    const url = `https://github.com/${encodeURIComponent(user)}/${encodeURIComponent(user)}/new/${encodeURIComponent(branch)}?filename=${encodeURIComponent(filename)}&value=${encodeURIComponent(content)}`;
     if (url.length > 7000) {
-      anchor.href = "#gh-deploy-user";
-      anchor.removeAttribute("target");
-      anchor.removeAttribute("rel");
-      anchor.setAttribute("aria-disabled", "true");
+      setDisabledAnchor(anchor);
       return false;
     }
     anchor.href = url;
@@ -982,15 +1100,25 @@ function updateGithubQuickLinks(jsonText, yamlText) {
 
   const jsonFits = setLink(el.ghCreateJsonBtn, "termcard.json", jsonText);
   setLink(el.ghCreateYamlBtn, ".github/workflows/termcard.yml", yamlText);
+  if (el.ghEditReadmeBtn) {
+    if (!valid) {
+      setDisabledAnchor(el.ghEditReadmeBtn);
+    } else {
+      el.ghEditReadmeBtn.href = `https://github.com/${encodeURIComponent(user)}/${encodeURIComponent(user)}/edit/${encodeURIComponent(branch)}/README.md`;
+      el.ghEditReadmeBtn.target = "_blank";
+      el.ghEditReadmeBtn.rel = "noopener noreferrer";
+      el.ghEditReadmeBtn.removeAttribute("aria-disabled");
+    }
+  }
 
   if (!user) {
     el.ghUserHint.textContent = "Enter your GitHub username to prefill files directly in github.com/username/username.";
   } else if (!valid) {
     el.ghUserHint.textContent = "Enter a valid GitHub username (letters, numbers, single hyphens, max 39 chars).";
   } else if (!jsonFits) {
-    el.ghUserHint.textContent = `Ready for github.com/${user}/${user} (JSON is too long for a URL prefill; use Copy or Download).`;
+    el.ghUserHint.textContent = `Ready for github.com/${user}/${user} (${branch}) (JSON is too long for a URL prefill; use Copy or Download).`;
   } else {
-    el.ghUserHint.textContent = `1-click links point to github.com/${user}/${user} (main branch).`;
+    el.ghUserHint.textContent = `1-click Create opens github.com/${user}/${user} (${branch}). If a file already exists, edit it directly on GitHub.`;
   }
 }
 
@@ -1031,6 +1159,7 @@ function addCard(type) {
       title: "Streak",
       current_label: "Current streak",
       longest_label: "Longest streak",
+      unit: "days",
       preview_current: 7,
       preview_longest: 14,
       alt: "GitHub streak",
@@ -1084,6 +1213,10 @@ function setPreviewBackdrop(mode) {
     btn.classList.toggle("is-active", active);
     btn.setAttribute("aria-pressed", String(active));
   });
+  if (canvas && state.dualTheme) {
+    renderPreviewAndExport();
+    return;
+  }
   canvas?.refreshLive();
   saveToStorage();
 }
@@ -1156,9 +1289,15 @@ function importConfigFromText(rawText) {
     return false;
   }
 
-  const nextTheme = THEMES[parsed.theme] ? parsed.theme : "dashed-dark";
-  const hasStyle = parsed.style && typeof parsed.style === "object" && Object.keys(parsed.style).length > 0;
+  const isDual = Boolean(parsed.theme && typeof parsed.theme === "object");
+  const nextTheme = isDual
+    ? (THEMES[parsed.theme.dark] ? parsed.theme.dark : "dashed-dark")
+    : (THEMES[parsed.theme] ? parsed.theme : "dashed-dark");
+  const nextLightTheme = isDual
+    ? (THEMES[parsed.theme.light] ? parsed.theme.light : "dashed-light")
+    : "dashed-light";
   const baseT = THEMES[nextTheme];
+  const parsedStyle = extractImportedStyle(parsed.style, baseT);
 
   const importedCards = [];
   for (let i = 0; i < parsed.cards.length; i += 1) {
@@ -1168,11 +1307,14 @@ function importConfigFromText(rawText) {
       el.importError.hidden = false;
       return false;
     }
+    const cardWidth = Number.isFinite(Number(c.width)) ? Number(c.width) : undefined;
+    const widthOpt = cardWidth !== undefined ? { width: cardWidth } : {};
     if (c.type === "typing") {
       importedCards.push({
         id: uid(),
         type: "typing",
         output: c.output || `typing-${i + 1}.svg`,
+        ...widthOpt,
         prompt_top: c.prompt_top ?? "┌ your-username",
         prompt_bottom: c.prompt_bottom ?? "└›",
         words: Array.isArray(c.words) && c.words.length ? c.words.map(String) : ["Hi"],
@@ -1189,21 +1331,27 @@ function importConfigFromText(rawText) {
         id: uid(),
         type: "info",
         output: c.output || `info-${i + 1}.svg`,
+        ...widthOpt,
         alt: c.alt || "Profile info",
         sections: rawSections.map((sec) =>
           sec.map((row) => (Array.isArray(row) ? [String(row[0] ?? ""), String(row[1] ?? "")] : [String(row.label ?? ""), String(row.value ?? "")]))
         ),
       });
     } else if (c.type === "streak") {
+      const tz = Number(c.timezone_offset);
+      const demoDays = c.demo_days && typeof c.demo_days === "object" ? { ...c.demo_days } : undefined;
       importedCards.push({
         id: uid(),
         type: "streak",
         output: c.output || `streak-${i + 1}.svg`,
+        ...widthOpt,
         user: String(c.user || "your-username"),
-        timezone_offset: Number(c.timezone_offset) || 0,
+        timezone_offset: Number.isFinite(tz) ? tz : 0,
         title: String(c.title || "Streak"),
         current_label: String(c.current_label || "Current streak"),
         longest_label: String(c.longest_label || "Longest streak"),
+        unit: String(c.unit || "days"),
+        ...(demoDays ? { demo_days: demoDays } : {}),
         preview_current: 7,
         preview_longest: 14,
         alt: c.alt || "GitHub streak",
@@ -1213,6 +1361,7 @@ function importConfigFromText(rawText) {
         id: uid(),
         type: "link",
         output: c.output || `link-${i + 1}.svg`,
+        ...widthOpt,
         label: String(c.label || "Link"),
         value: String(c.value || ""),
         url: String(c.url || ""),
@@ -1222,17 +1371,16 @@ function importConfigFromText(rawText) {
   }
 
   state = {
+    schemaUrl: typeof parsed.$schema === "string" ? parsed.$schema : "",
     theme: nextTheme,
+    dualTheme: isDual,
+    lightTheme: nextLightTheme,
     width: Number(parsed.width) || 560,
     radius: Number(parsed.radius ?? 6),
-    useCustomColors: Boolean(hasStyle),
-    style: {
-      bg: parsed.style?.bg || baseT.bg,
-      stroke: parsed.style?.stroke || baseT.stroke,
-      text: parsed.style?.text || baseT.text,
-      muted: parsed.style?.muted || baseT.muted,
-      link: parsed.style?.link || baseT.link,
-    },
+    font: typeof parsed.font === "string" ? parsed.font : "",
+    useCustomColors: parsedStyle.useCustomColors,
+    extraStyle: parsedStyle.extraStyle,
+    style: parsedStyle.colors,
     cards: importedCards,
   };
 
@@ -1307,6 +1455,40 @@ function wireEvents() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && sheetOpen && !el.importDialog?.open) {
       closeSheet();
+      return;
+    }
+    if (
+      (e.key === "b" || e.key === "B") &&
+      !sheetOpen &&
+      !el.importDialog?.open &&
+      !e.repeat &&
+      !e.altKey &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.target.closest?.("input, textarea, select, dialog, [contenteditable]")
+    ) {
+      e.preventDefault();
+      sound.tap();
+      openSheet();
+    }
+  });
+
+  el.dualThemeToggle.addEventListener("change", (e) => {
+    state.dualTheme = e.target.checked;
+    if (state.dualTheme && state.theme.includes("light")) {
+      state.lightTheme = state.theme;
+      state.theme = state.theme === "solid-light" ? "solid-dark" : "dashed-dark";
+      if (!state.useCustomColors) syncColorInputsFromTheme(state.theme);
+    }
+    syncFrameControls();
+    renderThemePicker();
+    renderPreviewAndExport();
+  });
+
+  el.lightThemeSelect.addEventListener("change", (e) => {
+    if (THEMES[e.target.value]) {
+      state.lightTheme = e.target.value;
+      renderPreviewAndExport();
     }
   });
 
@@ -1354,8 +1536,10 @@ function wireEvents() {
     state = createStarterState();
     openCardIds = new Set(state.cards[0] ? [state.cards[0].id] : []);
     deployUser = "";
+    deployBranch = "main";
     includePrivatePat = false;
     el.ghDeployUser.value = "";
+    el.ghDeployBranch.value = "main";
     el.privatePatToggle.checked = false;
     syncFrameControls();
     renderThemePicker();
@@ -1365,6 +1549,11 @@ function wireEvents() {
   };
   document.getElementById("reset-default-btn").addEventListener("click", resetAll);
   document.getElementById("restore-from-empty-btn").addEventListener("click", resetAll);
+
+  el.ghDeployBranch.addEventListener("input", (e) => {
+    deployBranch = e.target.value;
+    renderPreviewAndExport();
+  });
 
   el.ghDeployUser.addEventListener("input", (e) => {
     const prev = deployUser.trim();
@@ -1397,6 +1586,7 @@ function wireEvents() {
   };
   el.ghCreateJsonBtn.addEventListener("click", guardDisabledLink);
   el.ghCreateYamlBtn.addEventListener("click", guardDisabledLink);
+  el.ghEditReadmeBtn?.addEventListener("click", guardDisabledLink);
 
   document.querySelectorAll("[data-backdrop]").forEach((btn) => {
     btn.addEventListener("click", () => setPreviewBackdrop(btn.dataset.backdrop));
@@ -1474,11 +1664,13 @@ function wireEvents() {
 }
 
 loadFromStorage();
+populateLightThemeSelect();
 updateMotionButton();
 updateSoundButton();
 applyPageTheme(pageTheme);
 setPreviewBackdrop(previewBackdrop);
 el.ghDeployUser.value = deployUser;
+el.ghDeployBranch.value = deployBranch;
 el.privatePatToggle.checked = includePrivatePat;
 syncFrameControls();
 renderThemePicker();
@@ -1509,7 +1701,12 @@ canvas = initCanvas({
   },
 });
 wireEvents();
-if (window.location.hash === "#builder" || window.location.hash === "#builder-sheet") {
+const urlParams = new URLSearchParams(window.location.search);
+const presetParam = urlParams.get("preset");
+if (presetParam && THEMES[presetParam]) {
+  selectCardTheme(presetParam, true);
+  openSheet();
+} else if (window.location.hash === "#builder" || window.location.hash === "#builder-sheet") {
   openSheet();
 }
 

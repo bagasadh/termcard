@@ -1,0 +1,196 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/bagasadh/termcard/main/termcard.schema.json",
+  "title": "termcard configuration",
+  "description": "Configuration schema for generating terminal-styled SVG profile cards with termcard.",
+  "type": "object",
+  "required": ["cards"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional JSON Schema reference."
+    },
+    "theme": {
+      "description": "Preset theme name or an object mapping dark and light modes to preset theme names.",
+      "oneOf": [
+        { "$ref": "#/definitions/themeName" },
+        {
+          "type": "object",
+          "required": ["dark", "light"],
+          "additionalProperties": false,
+          "properties": {
+            "dark": { "$ref": "#/definitions/themeName" },
+            "light": { "$ref": "#/definitions/themeName" }
+          }
+        }
+      ]
+    },
+    "width": {
+      "type": "integer",
+      "minimum": 360,
+      "maximum": 680,
+      "default": 560,
+      "description": "Default card width in pixels."
+    },
+    "radius": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 20,
+      "default": 6,
+      "description": "Corner radius in pixels."
+    },
+    "font": {
+      "type": "string",
+      "description": "Custom CSS font-family stack for rendered SVG text."
+    },
+    "style": {
+      "description": "Color and border overrides, either flat or nested under dark and light keys.",
+      "oneOf": [
+        { "$ref": "#/definitions/styleOverrides" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dark": { "$ref": "#/definitions/styleOverrides" },
+            "light": { "$ref": "#/definitions/styleOverrides" }
+          }
+        }
+      ]
+    },
+    "cards": {
+      "type": "array",
+      "description": "Ordered list of cards to generate.",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/definitions/typingCard" },
+          { "$ref": "#/definitions/infoCard" },
+          { "$ref": "#/definitions/streakCard" },
+          { "$ref": "#/definitions/linkCard" }
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "themeName": {
+      "type": "string",
+      "enum": ["dashed-dark", "dashed-light", "solid-dark", "solid-light", "terminal-green"]
+    },
+    "styleOverrides": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bg": { "type": "string" },
+        "bg_opacity": { "type": ["string", "number"] },
+        "stroke": { "type": "string" },
+        "outline": { "type": "string" },
+        "outline_opacity": { "type": ["string", "number"] },
+        "dasharray": { "type": "string" },
+        "outline_dasharray": { "type": "string" },
+        "text": { "type": "string" },
+        "muted": { "type": "string" },
+        "link": { "type": "string" }
+      }
+    },
+    "infoRow": {
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "string" }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "label": { "type": "string" },
+            "value": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "typingCard": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "typing" },
+        "output": { "type": "string", "description": "Relative .svg path inside output_dir." },
+        "width": { "type": "integer", "minimum": 360, "maximum": 680 },
+        "prompt_top": { "type": "string" },
+        "prompt_bottom": { "type": "string" },
+        "user": { "type": "string" },
+        "words": {
+          "oneOf": [
+            { "type": "array", "items": { "type": "string" } },
+            { "type": "string" }
+          ]
+        },
+        "duration": { "type": "number", "minimum": 2 },
+        "url": { "type": "string" },
+        "alt": { "type": "string" }
+      }
+    },
+    "infoCard": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "info" },
+        "output": { "type": "string" },
+        "width": { "type": "integer", "minimum": 360, "maximum": 680 },
+        "sections": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/infoRow" }
+          }
+        },
+        "rows": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/infoRow" }
+        },
+        "url": { "type": "string" },
+        "alt": { "type": "string" }
+      }
+    },
+    "streakCard": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "streak" },
+        "output": { "type": "string" },
+        "width": { "type": "integer", "minimum": 360, "maximum": 680 },
+        "user": { "type": "string" },
+        "timezone_offset": { "type": "number", "minimum": -12, "maximum": 14, "default": 0 },
+        "title": { "type": "string", "default": "Streak" },
+        "current_label": { "type": "string", "default": "Current streak" },
+        "longest_label": { "type": "string", "default": "Longest streak" },
+        "unit": { "type": "string", "default": "days" },
+        "demo_days": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "url": { "type": "string" },
+        "alt": { "type": "string" }
+      }
+    },
+    "linkCard": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "link" },
+        "output": { "type": "string" },
+        "width": { "type": "integer", "minimum": 360, "maximum": 680 },
+        "label": { "type": "string" },
+        "value": { "type": "string" },
+        "url": { "type": "string" },
+        "alt": { "type": "string" }
+      }
+    }
+  }
+}
+

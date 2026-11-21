@@ -10,8 +10,8 @@ Generate terminal-styled SVG profile cards (typing banner, info box, GitHub stre
 </p>
 
 ## Features
-- Four card types (`typing`, `info`, `streak`, `link`) and five built-in themes (`dashed-dark`, `dashed-light`, `solid-dark`, `solid-light`, `terminal-green`).
-- Zero external dependencies (Python 3 standard library only) with optional auto-injection between `<!-- TERMCARD:START -->` and `<!-- TERMCARD:END -->`.
+- Four card types (`typing`, `info`, `streak`, `link`), five built-in themes (`dashed-dark`, `dashed-light`, `solid-dark`, `solid-light`, `terminal-green`), and optional dual dark/light mode (`<picture>`).
+- Zero external dependencies (Python 3 standard library only) with auto-injection between `<!-- TERMCARD:START -->` and `<!-- TERMCARD:END -->`.
 - Static visual builder at [termcard.vercel.app](https://termcard.vercel.app/) to customize cards and create `termcard.json` + workflow YAML on GitHub in one click.
 
 ## Usage
@@ -25,6 +25,9 @@ on:
   schedule: [{ cron: "0 17 * * *" }]
   workflow_dispatch:
 permissions: { contents: write }
+concurrency:
+  group: termcard-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -38,6 +41,6 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-Note: `GITHUB_TOKEN` counts public contributions only; use a Personal Access Token secret (such as `secrets.STREAK_TOKEN`) to include private repos.
+Note: `GITHUB_TOKEN` counts public contributions only; use a Personal Access Token secret (such as `secrets.STREAK_TOKEN`) to include private repos. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) and [termcard.schema.json](termcard.schema.json) for all options and troubleshooting.
 
 Run locally: `python3 termcard.py --config examples/termcard.json --out assets --skip-streak` or preview the web builder with `python3 -m http.server 3000 -d web`.

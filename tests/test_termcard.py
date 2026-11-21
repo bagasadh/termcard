@@ -1,9 +1,12 @@
 import datetime as dt
+import io
 import json
 import tempfile
 import unittest
+import urllib.error
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest import mock
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -184,12 +187,187 @@ class TestTermcard(unittest.TestCase):
         preview_dir = repo_root / "examples" / "preview"
         with tempfile.TemporaryDirectory() as tmp:
             out_dir = Path(tmp)
-            termcard.build_cards(cfg_path, out_dir, skip_streak=True)
+            termcard.build_cards(cfg_path, out_dir, skip_streak=True, clean=False)
             for name in ("typing.svg", "info.svg", "contact-email.svg"):
                 self.assertEqual(
                     (preview_dir / name).read_text(encoding="utf-8"),
                     (out_dir / name).read_text(encoding="utf-8"),
                 )
+
+    def test_info_and_link_truncate_long_text(self) -> None:
+        t = termcard.resolve_theme({"theme": "dashed-dark", "width": 360})
+        long_val = "x" * 90
+        info_svg = termcard.render_info({"sections": [[["Very Long Key Label Name", long_val]]]}, t)
+        self.assertValidSvg(info_svg)
+        self.assertIn("...", info_svg)
+        self.assertNotIn(long_val, info_svg)
+
+        link_svg = termcard.render_link({"label": "Website", "value": "https://example.com/" + "a" * 60}, t)
+        self.assertValidSvg(link_svg)
+        self.assertIn("...", link_svg)
+
+    def test_render_typing_has_clip_path(self) -> None:
+        t = termcard.resolve_theme({"theme": "solid-dark", "width": 360, "radius": 8})
+        svg = termcard.render_typing({"words": ["a" * 80]}, t)
+        self.assertValidSvg(svg)
+        self.assertIn('<clipPath id="tc-clip-360-8">', svg)
+        self.assertIn('clip-path="url(#tc-clip-360-8)"', svg)
+
+    def test_streak_float_timezone_smart_year_and_invalid_user(self) -> None:
+        self.assertEqual(termcard.parse_tz_offset(5.5), 5.5)
+        self.assertEqual(termcard.parse_tz_offset("bad"), 0.0)
+        self.assertEqual(termcard.parse_tz_offset(float("nan")), 0.0)
+        self.assertEqual(termcard.parse_tz_offset(99), 14.0)
+
+        self.assertEqual(
+            termcard.format_range(dt.date(2026, 11, 5), dt.date(2026, 11, 6), ref_year=2026),
+            "Nov 05 - Nov 06",
+        )
+        self.assertEqual(
+            termcard.format_range(dt.date(2025, 11, 1), dt.date(2025, 11, 15), ref_year=2026),
+            "Nov 01 - Nov 15, 2025",
+        )
+        self.assertEqual(
+            termcard.format_range(dt.date(2025, 11, 1), dt.date(2025, 11, 1), ref_year=2026),
+            "Nov 01, 2025",
+        )
+        self.assertEqual(
+            termcard.format_range(dt.date(2025, 12, 28), dt.date(2026, 1, 3), ref_year=2026),
+            "Dec 28 '25 - Jan 03 '26",
+        )
+
+        t = termcard.resolve_theme({"theme": "dashed-dark"})
+        empty_svg = termcard.render_streak({"timezone_offset": 5.5, "demo_days": {}}, t, token="")
+        self.assertValidSvg(empty_svg)
+        self.assertIn(">0<", empty_svg)
+        self.assertIn(">-<", empty_svg)
+
+        fake_resp = mock.MagicMock()
+        fake_resp.read.return_value = json.dumps({"data": {"user": None}}).encode("utf-8")
+        fake_resp.__enter__.return_value = fake_resp
+        with mock.patch("urllib.request.urlopen", return_value=fake_resp):
+            with self.assertRaisesRegex(ValueError, "not found"):
+                termcard.fetch_contribution_days("ghost-user-xyz", "tok", 2026)
+
+        err_401 = urllib.error.HTTPError("https://api.github.com/graphql", 401, "Unauthorized", {}, io.BytesIO(b""))
+        with mock.patch("urllib.request.urlopen", side_effect=err_401):
+            with self.assertRaisesRegex(RuntimeError, "401 Unauthorized"):
+                termcard.fetch_contribution_days("octocat", "bad-tok", 2026)
+
+    def test_dual_theme_picture_readme_and_single_fetch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg_path = root / "termcard.json"
+            readme_path = root / "README.md"
+            out_dir = root / "assets"
+            cfg_path.write_text(
+                json.dumps(
+                    {
+                        "theme": {"dark": "dashed-dark", "light": "dashed-light"},
+                        "style": {"dark": {"stroke": "#ff0000"}, "light": {"stroke": "#0000ff"}},
+                        "cards": [
+                            {"type": "typing", "output": "typing.svg", "words": ["hi"]},
+                            {"type": "streak", "output": "streak.svg", "user": "octocat"},
+                            {"type": "link", "output": "web.svg", "label": "Web", "value": "example.com", "url": "https://example.com"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            readme_path.write_text("<!-- TERMCARD:START -->\n<!-- TERMCARD:END -->\n", encoding="utf-8")
+
+            with mock.patch("termcard.fetch_contribution_days", return_value={"2026-11-20": 3}) as fetch_mock:
+                written = termcard.build_cards(cfg_path, out_dir, token="tok", readme_path=readme_path)
+
+            self.assertEqual(fetch_mock.call_count, 1)
+            self.assertEqual(len(written), 6)
+            for p in written:
+                self.assertValidSvg(p.read_text(encoding="utf-8"))
+            self.assertIn('stroke="#ff0000"', (out_dir / "typing-dark.svg").read_text(encoding="utf-8"))
+            self.assertIn('stroke="#0000ff"', (out_dir / "typing-light.svg").read_text(encoding="utf-8"))
+
+            readme_text = readme_path.read_text(encoding="utf-8")
+            self.assertIn("<picture>", readme_text)
+            self.assertIn('media="(prefers-color-scheme: dark)" srcset="assets/typing-dark.svg"', readme_text)
+            self.assertIn('media="(prefers-color-scheme: light)" srcset="assets/typing-light.svg"', readme_text)
+            self.assertIn('<a href="https://example.com"><picture>', readme_text)
+
+    def test_output_path_traversal_and_nested_subfolder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out_dir = root / "assets"
+            for bad in ("../evil.svg", "/tmp/evil.svg", ".termcard-manifest.json", r"sub\bad.svg", "."):
+                with self.assertRaises(ValueError):
+                    termcard.resolve_output_path(out_dir, bad)
+
+            cfg_path = root / "termcard.json"
+            cfg_path.write_text(
+                json.dumps({"cards": [{"type": "link", "output": "cards/mail.svg", "label": "Email", "value": "a@b.c"}]}),
+                encoding="utf-8",
+            )
+            written = termcard.build_cards(cfg_path, out_dir)
+            self.assertEqual(len(written), 1)
+            self.assertTrue((out_dir / "cards" / "mail.svg").exists())
+
+    def test_manifest_cleanup_and_no_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg_path = root / "termcard.json"
+            out_dir = root / "assets"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            unrelated = out_dir / "custom-photo.png"
+            unrelated.write_bytes(b"png")
+
+            cfg_path.write_text(
+                json.dumps(
+                    {
+                        "cards": [
+                            {"type": "typing", "output": "typing.svg", "words": ["hi"]},
+                            {"type": "info", "output": "info.svg", "rows": [["OS", "Linux"]]},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            termcard.build_cards(cfg_path, out_dir, clean=True)
+            self.assertTrue((out_dir / "typing.svg").exists())
+            self.assertTrue((out_dir / "info.svg").exists())
+            self.assertTrue((out_dir / termcard.MANIFEST_NAME).exists())
+
+            cfg_path.write_text(
+                json.dumps({"cards": [{"type": "typing", "output": "typing.svg", "words": ["hi"]}]}),
+                encoding="utf-8",
+            )
+            termcard.build_cards(cfg_path, out_dir, clean=True)
+            self.assertTrue((out_dir / "typing.svg").exists())
+            self.assertFalse((out_dir / "info.svg").exists())
+            self.assertTrue(unrelated.exists())
+
+            cfg_path.write_text(
+                json.dumps({"cards": [{"type": "link", "output": "link.svg", "label": "X", "value": "Y"}]}),
+                encoding="utf-8",
+            )
+            termcard.build_cards(cfg_path, out_dir, clean=False)
+            self.assertTrue((out_dir / "typing.svg").exists())
+            self.assertTrue((out_dir / "link.svg").exists())
+
+            streak_file = out_dir / "streak.svg"
+            streak_file.write_text("<svg/>", encoding="utf-8")
+            manifest_before = (out_dir / termcard.MANIFEST_NAME).read_text(encoding="utf-8")
+            cfg_path.write_text(
+                json.dumps(
+                    {
+                        "cards": [
+                            {"type": "typing", "output": "typing.svg", "words": ["hi"]},
+                            {"type": "streak", "output": "streak.svg", "user": "octocat"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            termcard.build_cards(cfg_path, out_dir, skip_streak=True, clean=True)
+            self.assertTrue(streak_file.exists())
+            self.assertEqual((out_dir / termcard.MANIFEST_NAME).read_text(encoding="utf-8"), manifest_before)
 
 
 if __name__ == "__main__":

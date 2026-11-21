@@ -11,9 +11,14 @@
   <meta property="og:url" content="https://termcard.vercel.app/">
   <meta property="og:title" content="termcard by bagasadh">
   <meta property="og:description" content="Create terminal-styled SVG profile cards for GitHub READMEs visually, then publish with one GitHub Action.">
-  <meta name="twitter:card" content="summary">
+  <meta property="og:image" content="https://termcard.vercel.app/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="termcard terminal-styled SVG profile cards and visual builder">
+  <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="termcard by bagasadh">
   <meta name="twitter:description" content="Terminal-styled SVG profile cards for GitHub READMEs from one JSON file.">
+  <meta name="twitter:image" content="https://termcard.vercel.app/og.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
@@ -44,7 +49,8 @@
             <span id="hud-preset-count" class="hud__count">01/06</span>
           </button>
           <button type="button" id="hud-builder-btn" class="hud-pill hud-pill-strong" data-open-sheet="builder">
-            Builder
+            <span>Builder</span>
+            <kbd class="hud-kbd hud-desktop-only" aria-hidden="true">B</kbd>
           </button>
           <button type="button" id="hud-setup-btn" class="hud-pill hud-tablet-up" data-fly="setup">
             Setup
@@ -73,7 +79,7 @@
     <footer class="hud hud--bottom">
       <p class="hint">
         <span class="hint__pad" aria-hidden="true"><span></span></span>
-        <span id="hud-hint-text">DRAG &middot; ARROWS &middot; &crarr; OPEN</span>
+        <span id="hud-hint-text">DRAG &middot; ARROWS &middot; B BUILDER &middot; &crarr; OPEN</span>
       </p>
       <p class="coords" aria-hidden="true">
         <span id="hud-tz">LOCAL</span>
@@ -121,9 +127,20 @@
                 <h3 class="panel-title">1. Theme and frame</h3>
 
                 <fieldset class="theme-fieldset">
-                  <legend class="field-label">Preset theme</legend>
+                  <legend id="theme-legend" class="field-label">Preset theme</legend>
                   <div id="theme-picker" class="theme-picker" role="radiogroup" aria-label="Card theme presets"></div>
                 </fieldset>
+
+                <div class="dual-theme-row">
+                  <label class="checkbox-label" for="dual-theme-toggle">
+                    <input type="checkbox" id="dual-theme-toggle">
+                    <span>Auto dark &amp; light mode for GitHub README (<code>&lt;picture&gt;</code>)</span>
+                  </label>
+                  <div id="light-theme-picker-wrap" class="field dual-theme-select" hidden>
+                    <label for="light-theme-select" class="field-label">Light mode theme</label>
+                    <select id="light-theme-select" class="text-input"></select>
+                  </div>
+                </div>
 
                 <div class="range-row">
                   <div class="field">
@@ -215,9 +232,15 @@
 
                 <div class="panel-block export-panel">
                   <div class="gh-quick-bar">
-                    <div class="field">
-                      <label for="gh-deploy-user" class="field-label">GitHub username (enables 1-click Create on GitHub)</label>
-                      <input id="gh-deploy-user" type="text" class="text-input" placeholder="e.g. bagasadh" autocomplete="username">
+                    <div class="gh-quick-grid">
+                      <div class="field">
+                        <label for="gh-deploy-user" class="field-label">GitHub username (enables 1-click Create on GitHub)</label>
+                        <input id="gh-deploy-user" type="text" class="text-input" placeholder="e.g. bagasadh" autocomplete="username">
+                      </div>
+                      <div class="field">
+                        <label for="gh-deploy-branch" class="field-label">Branch</label>
+                        <input id="gh-deploy-branch" type="text" class="text-input" value="main" placeholder="main">
+                      </div>
                     </div>
                     <p id="gh-user-hint" class="export-hint gh-user-hint">Enter your GitHub username to prefill files directly in github.com/username/username.</p>
                   </div>
@@ -256,6 +279,7 @@
                     <p class="export-hint">Add these two comment lines anywhere in your profile <code>README.md</code> so the Action inserts your cards automatically:</p>
                     <div class="export-actions">
                       <button type="button" id="copy-markers-btn" class="btn-primary">Copy README markers</button>
+                      <a id="gh-edit-readme-btn" href="#gh-deploy-user" class="ctrl-btn" aria-disabled="true">Edit README.md on GitHub</a>
                     </div>
                     <pre class="code-output code-output-short"><code id="output-markers"></code></pre>
 
